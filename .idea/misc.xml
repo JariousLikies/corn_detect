@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="corn_defect_detection" />
+  </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="corn_defect_detection" project-jdk-type="Python SDK" />
+</project>
