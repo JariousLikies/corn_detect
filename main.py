@@ -24,22 +24,114 @@ def get_image_hash(image):
     return hashlib.md5(img_bytes).hexdigest()
 
 def export_detection_records_to_csv():
-    """导出检测记录到CSV文件"""
+    """导出检测记录到CSV文件，并保存带框的检测                    💡 **特别说明：**
+                    - CSV文件中包含所有检测图片的绝对路径
+                    - 图片文件名格式：检测时间_序号.jpg（如：20250807_145754_001.jpg）
+                    - 可直接通过CSV文件中的路径打开对应图片"""
     if 'detection_records' not in st.session_state or not st.session_state.detection_records:
         return None
+    
+    # 生成时间戳
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    # 获取导出基础路径
+    export_base_path = st.session_state.get('export_base_path', os.path.join(os.path.expanduser("~"), "Desktop", "corn_detection_exports"))
+    
+    # 创建基础导出文件夹（如果不存在）
+    os.makedirs(export_base_path, exist_ok=True)
+    
+    # 创建此次导出的具体文件夹
+    archive_folder = f"corn_detection_export_{timestamp}"
+    archive_path = os.path.join(export_base_path, archive_folder)
+    os.makedirs(archive_path, exist_ok=True)
     
     # 创建DataFrame
     df = pd.DataFrame(st.session_state.detection_records)
     
-    # 生成文件名（包含时间戳）
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"corn_detection_records_{timestamp}.csv"
+    # 添加检测结果图片绝对路径列
+    df['检测结果图片绝对路径'] = ''
     
-    # 保存到当前目录
-    filepath = os.path.join(os.getcwd(), filename)
-    df.to_csv(filepath, index=False, encoding='utf-8-sig')
+    # 统计保存成功的图片数量
+    saved_images_count = 0
+    failed_images_count = 0
     
-    return filepath, df
+    # 保存带框的检测结果图片
+    if 'result_images_cache' in st.session_state:
+        for idx, record in enumerate(st.session_state.detection_records):
+            img_name = record['图片名称']
+            detection_time = record['检测时间']
+            
+            # 使用检测时间作为文件名（替换特殊字符）
+            safe_time = detection_time.replace(':', '').replace('-', '').replace(' ', '_')
+            # 添加序号确保文件名唯一，统一使用.jpg扩展名
+            result_filename = f"{safe_time}_{idx+1:03d}.jpg"
+            result_save_path = os.path.join(archive_path, result_filename)
+            
+            # 保存检测结果图
+            if img_name in st.session_state.result_images_cache:
+                result_img_array = st.session_state.result_images_cache[img_name]
+                try:
+                    # 确保图片格式正确
+                    if len(result_img_array.shape) == 3 and result_img_array.shape[2] == 3:
+                        # BGR to RGB for saving
+                        result_img_rgb = cv2.cvtColor(result_img_array, cv2.COLOR_BGR2RGB)
+                        result_pil = Image.fromarray(result_img_rgb)
+                    else:
+                        result_pil = Image.fromarray(result_img_array)
+                    
+                    result_pil.save(result_save_path)
+                    # 使用绝对路径
+                    df.loc[idx, '检测结果图片绝对路径'] = os.path.abspath(result_save_path)
+                    saved_images_count += 1
+                    
+                except Exception as e:
+                    st.warning(f"保存检测结果图失败: {img_name}, 错误: {e}")
+                    df.loc[idx, '检测结果图片绝对路径'] = f'保存失败: {str(e)}'
+                    failed_images_count += 1
+            else:
+                df.loc[idx, '检测结果图片绝对路径'] = '图片缓存不存在'
+                failed_images_count += 1
+    
+    # 保存CSV文件到同一文件夹
+    csv_filename = f"corn_detection_records_{timestamp}.csv"
+    csv_filepath = os.path.join(archive_path, csv_filename)
+    df.to_csv(csv_filepath, index=False, encoding='utf-8-sig')
+    
+    # 创建简要说明文件
+    readme_content = f"""玉米质量检测导出说明
+===================
+
+导出时间: {time.strftime("%Y年%m月%d日 %H:%M:%S")}
+导出位置: {os.path.abspath(archive_path)}
+
+统计信息:
+- 检测图片总数: {len(st.session_state.detection_records)} 张
+- 成功保存图片: {saved_images_count} 张
+- 保存失败图片: {failed_images_count} 张
+
+文件说明:
+- {csv_filename}: 检测记录CSV文件（包含检测结果图片绝对路径）
+- *.jpg: 带检测框的结果图片（以检测时间命名）
+
+CSV文件字段说明:
+- 图片名称: 原始图片文件名
+- 检测时间: 检测执行的时间
+- 检测结果: 检测到的坏粒和杂质详情
+- 检测对象总数: 检测到的对象数量
+- 置信度阈值: 使用的检测置信度阈值
+- 检测结果图片绝对路径: 带检测框的图片文件的完整绝对路径
+
+注意: 
+1. 图片文件以检测时间命名（格式：YYYYMMDD_HHMMSS_序号.jpg），便于按时间排序和管理
+2. CSV文件中的路径为绝对路径，可直接在文件管理器中打开
+3. 所有检测到的图片都会被保存（不仅仅是预览的几张）
+"""
+    
+    readme_path = os.path.join(archive_path, "导出说明.txt")
+    with open(readme_path, 'w', encoding='utf-8') as f:
+        f.write(readme_content)
+    
+    return csv_filepath, df, archive_path, saved_images_count, failed_images_count
 
 def add_detection_record(image_name, detected_objects, detection_time, total_objects=0):
     """添加检测记录"""
@@ -155,6 +247,28 @@ with st.sidebar:
                 )
             detection_colors = st.session_state.detection_colors
 
+    # 导出设置
+    st.header("导出设置")
+    with st.expander("📂 导出路径配置"):
+        # 默认导出路径
+        default_export_path = os.path.join(os.path.expanduser("~"), "Desktop", "corn_detection_exports")
+        
+        # 自定义导出路径
+        custom_export_path = st.text_input(
+            "自定义导出路径（可选）",
+            value="",
+            placeholder=f"留空使用默认路径: {default_export_path}",
+            help="输入自定义的导出文件夹路径，留空则使用桌面上的默认文件夹"
+        )
+        
+        # 保存导出路径到session state
+        if custom_export_path.strip():
+            st.session_state.export_base_path = custom_export_path.strip()
+        else:
+            st.session_state.export_base_path = default_export_path
+        
+        st.info(f"当前导出路径: {st.session_state.export_base_path}")
+    
     st.header("关于")
     st.info("""
     本平台专为玉米坏粒和杂质检测设计，支持多种图片格式。
@@ -269,6 +383,10 @@ if 'latest_label_counts' not in st.session_state:
     st.session_state.latest_label_counts = None
 if 'detection_records' not in st.session_state:
     st.session_state.detection_records = []
+if 'result_images_cache' not in st.session_state:
+    st.session_state.result_images_cache = {}
+if 'export_base_path' not in st.session_state:
+    st.session_state.export_base_path = os.path.join(os.path.expanduser("~"), "Desktop", "corn_detection_exports")
 
 # ========== 模型加载 =========
 if 'loaded_model' not in st.session_state or 'loaded_model_type' not in st.session_state:
@@ -422,8 +540,9 @@ with col1:
             start_time = time.time()
             log_event(f"开始识别，共 {len(st.session_state.frame_paths)} 张图片")
             
-            # 清空之前的检测记录
+            # 清空之前的检测记录和缓存
             st.session_state.detection_records = []
+            st.session_state.result_images_cache = {}
 
             for frame_path in st.session_state.frame_paths:
                 image = Image.open(frame_path)
@@ -448,6 +567,9 @@ with col1:
                         )
                         result_images.append((result_img, img_name))
                         
+                        # 缓存检测结果图片
+                        st.session_state.result_images_cache[img_name] = result_img.copy()
+                        
                         if len(filtered_class_ids) > 0:
                             label_names = [get_label(cls_id) for cls_id in filtered_class_ids]
                             label_counts = Counter(label_names)
@@ -469,8 +591,9 @@ with col1:
                         log_event(f"{img_name} 处理失败: {str(e)}")
                         # 添加失败记录
                         add_detection_record(img_name, f"处理失败: {str(e)}", detection_time, 0)
-                        # 使用原图作为结果
+                        # 使用原图作为结果，也要缓存
                         result_images.append((img_array, img_name))
+                        st.session_state.result_images_cache[img_name] = img_array.copy()
 
             end_time = time.time()
             process_time = end_time - start_time
@@ -545,10 +668,13 @@ with col_record1:
             }
         )
         
+        st.markdown("💡 **说明：** 导出时，带检测框的图片将以检测时间加序号命名（如：20250807_145754_001.jpg），CSV文件将包含每张图片的绝对路径信息。")
+        
         # 显示统计信息
         total_images = len(st.session_state.detection_records)
         images_with_objects = len([r for r in st.session_state.detection_records if r['检测对象总数'] > 0])
         total_objects = sum([r['检测对象总数'] for r in st.session_state.detection_records])
+        cached_images = len(st.session_state.get('result_images_cache', {}))
         
         st.markdown(f"""
         **📊 本次检测统计：**
@@ -556,6 +682,7 @@ with col_record1:
         - 有检测对象的图片：{images_with_objects} 张
         - 检测对象总数：{total_objects} 个
         - 检测准确率：{(images_with_objects/total_images*100):.1f}%
+        - 缓存的结果图片：{cached_images} 张
         """)
         
     else:
@@ -564,33 +691,98 @@ with col_record1:
 with col_record2:
     st.markdown("#### 导出功能")
     
+    # 显示当前导出路径设置
+    current_export_path = st.session_state.get('export_base_path', os.path.join(os.path.expanduser("~"), "Desktop", "corn_detection_exports"))
+    st.markdown(f"📁 **当前导出路径：** `{current_export_path}`")
+    st.markdown("💡 *可在左侧边栏的'导出设置'中修改导出路径*")
+    
     if 'detection_records' in st.session_state and st.session_state.detection_records:
-        if st.button("📤 导出为CSV", type="primary"):
+        # 预览导出信息
+        total_records = len(st.session_state.detection_records)
+        cached_images = len(st.session_state.get('result_images_cache', {}))
+        
+        st.markdown("#### 📋 导出预览")
+        st.markdown(f"""
+        **即将导出：**
+        - 📄 检测记录：{total_records} 条
+        - 🖼️ 带框图片：{cached_images} 张
+        - 💾 CSV文件：1 个（含绝对路径）
+        - 📝 说明文件：1 个
+        """)
+        
+        if cached_images < total_records:
+            st.warning(f"⚠️ 注意：有 {total_records - cached_images} 张图片未缓存，可能无法导出对应的带框图片")
+        
+        st.markdown("---")
+        
+        # 生成预览的导出文件夹名
+        preview_timestamp = time.strftime("%Y%m%d_%H%M%S")
+        preview_folder_name = f"corn_detection_export_{preview_timestamp}"
+        preview_full_path = os.path.join(current_export_path, preview_folder_name)
+        
+        st.markdown("#### 🚀 开始导出")
+        st.markdown(f"**导出目标：** `{preview_full_path}`")
+        
+        if st.button("📤 一键导出", type="primary"):
             try:
-                filepath, df = export_detection_records_to_csv()
-                if filepath:
-                    log_event(f"检测记录导出成功: {os.path.basename(filepath)}")
-                    st.success(f"✅ 导出成功！\n文件保存位置：{filepath}")
+                result = export_detection_records_to_csv()
+                if result:
+                    csv_filepath, df, archive_path, saved_images_count, failed_images_count = result
+                    log_event(f"检测记录一键导出成功: {os.path.basename(archive_path)}")
+                    st.success(f"✅ 导出成功！\n📁 导出文件夹：{archive_path}")
                     
-                    # 提供下载链接
-                    with open(filepath, 'rb') as f:
+                    # 显示详细的导出统计信息
+                    st.info(f"""
+                    📊 **导出内容详情：**
+                    - 🖼️ 成功保存图片：{saved_images_count} 张
+                    - ❌ 保存失败图片：{failed_images_count} 张
+                    - 📄 检测记录CSV文件：1 个
+                    - 📝 说明文件：1 个
+                    - 📂 导出位置：{archive_path}
+                    
+                    � **特别说明：**
+                    - CSV文件中包含所有检测图片的绝对路径
+                    - 图片文件名格式：检测时间_原图名.扩展名
+                    - 可直接通过CSV文件中的路径打开对应图片
+                    """)
+                    
+                    # 如果有失败的图片，显示警告
+                    if failed_images_count > 0:
+                        st.warning(f"⚠️ 有 {failed_images_count} 张图片保存失败，请检查导出文件夹权限或磁盘空间。")
+                    
+                    # 提供下载CSV文件的按钮
+                    with open(csv_filepath, 'rb') as f:
                         st.download_button(
-                            label="🔽 下载CSV文件",
+                            label="🔽 下载CSV记录文件",
                             data=f.read(),
-                            file_name=os.path.basename(filepath),
+                            file_name=os.path.basename(csv_filepath),
                             mime='text/csv'
                         )
+                    
+                    # 提供文件夹位置信息和操作建议
+                    st.markdown(f"💡 **完整导出位置：** `{archive_path}`")
+                    st.markdown("🔍 您可以在文件管理器中打开此文件夹查看所有带检测框的图片。")
+                    st.markdown("📋 CSV文件中的'检测结果图片绝对路径'列包含每张图片的完整路径。")
+                    
                 else:
-                    st.error("❌ 导出失败！")
+                    st.error("❌ 导出失败！没有检测记录可导出。")
             except Exception as e:
                 st.error(f"❌ 导出时出现错误：{str(e)}")
-                logger.error(f"导出CSV时出错: {e}")
+                logger.error(f"一键导出时出错: {e}")
     else:
         st.info("需要先进行检测才能导出记录")
     
-    if st.button("🗑️ 清空记录"):
+    st.markdown("---")
+    st.markdown("#### 🗑️ 清空数据")
+    
+    if st.button("🗑️ 清空所有记录", type="secondary"):
+        # 统计要清空的数据
+        records_count = len(st.session_state.get('detection_records', []))
+        cache_count = len(st.session_state.get('result_images_cache', {}))
+        
         st.session_state.detection_records = []
-        log_event("清空检测记录")
-        st.success("✅ 记录已清空！")
+        st.session_state.result_images_cache = {}
+        log_event(f"清空检测记录({records_count}条)和图片缓存({cache_count}张)")
+        st.success(f"✅ 已清空 {records_count} 条检测记录和 {cache_count} 张缓存图片！")
         st.rerun()
 
