@@ -23,6 +23,39 @@ def get_image_hash(image):
     img_bytes = image.tobytes()
     return hashlib.md5(img_bytes).hexdigest()
 
+def export_detection_records_to_csv():
+    """导出检测记录到CSV文件"""
+    if 'detection_records' not in st.session_state or not st.session_state.detection_records:
+        return None
+    
+    # 创建DataFrame
+    df = pd.DataFrame(st.session_state.detection_records)
+    
+    # 生成文件名（包含时间戳）
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    filename = f"corn_detection_records_{timestamp}.csv"
+    
+    # 保存到当前目录
+    filepath = os.path.join(os.getcwd(), filename)
+    df.to_csv(filepath, index=False, encoding='utf-8-sig')
+    
+    return filepath, df
+
+def add_detection_record(image_name, detected_objects, detection_time, total_objects=0):
+    """添加检测记录"""
+    if 'detection_records' not in st.session_state:
+        st.session_state.detection_records = []
+    
+    record = {
+        '图片名称': image_name,
+        '检测时间': detection_time,
+        '检测结果': detected_objects if detected_objects else '未检测到坏粒或杂质',
+        '检测对象总数': total_objects,
+        '置信度阈值': st.session_state.get('current_confidence', 0.6)
+    }
+    
+    st.session_state.detection_records.append(record)
+
 # ========== 日志配置 =========
 logger = setup_logging()
 
@@ -105,6 +138,8 @@ with st.sidebar:
         confidence_threshold = st.slider(
             "置信度阈值", min_value=0.0, max_value=1.0, value=0.6, step=0.05
         )
+        # 保存当前置信度到session state
+        st.session_state.current_confidence = confidence_threshold
         from utils.image_processor import LABELS
         with st.expander("高级设置"):
             draw_bbox = st.checkbox("显示边界框", value=True)
@@ -232,6 +267,8 @@ if 'log_data' not in st.session_state:
     st.session_state.log_data = {'序号': [], '操作步骤': [], '执行时间': []}
 if 'latest_label_counts' not in st.session_state:
     st.session_state.latest_label_counts = None
+if 'detection_records' not in st.session_state:
+    st.session_state.detection_records = []
 
 # ========== 模型加载 =========
 if 'loaded_model' not in st.session_state or 'loaded_model_type' not in st.session_state:
@@ -364,7 +401,7 @@ with col1:
                         try:
                             img = Image.open(frame_path)
                             with cols[col]:
-                                st.image(img, caption=os.path.basename(frame_path), use_column_width=True)
+                                st.image(img, caption=os.path.basename(frame_path), use_container_width=True)
                         except Exception as e:
                             with cols[col]:
                                 st.warning(f"无法预览图片: {frame_path}，错误信息: {e}")
@@ -384,31 +421,56 @@ with col1:
             result_images = []
             start_time = time.time()
             log_event(f"开始识别，共 {len(st.session_state.frame_paths)} 张图片")
+            
+            # 清空之前的检测记录
+            st.session_state.detection_records = []
 
             for frame_path in st.session_state.frame_paths:
                 image = Image.open(frame_path)
                 img_array = np.array(image)
-                log_event(f"处理图片: {os.path.basename(frame_path)}")
+                img_name = os.path.basename(frame_path)
+                detection_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                log_event(f"处理图片: {img_name}")
                 if img_array.shape[2] == 4:
                     img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
                     log_event("图片通道由RGBA转为RGB")
                 else:
                     img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
                     log_event("图片通道由RGB转为BGR")
+                    
                 if st.session_state.loaded_model and st.session_state.loaded_model_type:
-                    result_img, filtered_class_ids = process_image(
-                        img_array, st.session_state.loaded_model, st.session_state.loaded_model_type,
-                        confidence_threshold, detection_colors,
-                        draw_bbox, draw_label, draw_confidence, line_thickness
-                    )
-                    result_images.append((result_img, os.path.basename(frame_path)))
-                    if len(filtered_class_ids) > 0:
-                        label_names = [get_label(cls_id) for cls_id in filtered_class_ids]
-                        label_counts = Counter(label_names)
-                        total_label_counts += label_counts
-                        log_event(f"{os.path.basename(frame_path)} 识别成功: {dict(label_counts)}")
-                    else:
-                        log_event(f"{os.path.basename(frame_path)} 未识别到坏粒或杂质")
+                    try:
+                        result_img, filtered_class_ids = process_image(
+                            img_array, st.session_state.loaded_model, st.session_state.loaded_model_type,
+                            confidence_threshold, detection_colors,
+                            draw_bbox, draw_label, draw_confidence, line_thickness
+                        )
+                        result_images.append((result_img, img_name))
+                        
+                        if len(filtered_class_ids) > 0:
+                            label_names = [get_label(cls_id) for cls_id in filtered_class_ids]
+                            label_counts = Counter(label_names)
+                            total_label_counts += label_counts
+                            
+                            # 格式化检测结果字符串
+                            detected_objects = ", ".join([f"{label}({count}个)" for label, count in label_counts.items()])
+                            total_objects = len(filtered_class_ids)
+                            
+                            log_event(f"{img_name} 识别成功: {dict(label_counts)}")
+                            
+                            # 添加检测记录
+                            add_detection_record(img_name, detected_objects, detection_time, total_objects)
+                        else:
+                            log_event(f"{img_name} 未检测到坏粒或杂质")
+                            # 添加空记录
+                            add_detection_record(img_name, "未检测到坏粒或杂质", detection_time, 0)
+                    except Exception as e:
+                        log_event(f"{img_name} 处理失败: {str(e)}")
+                        # 添加失败记录
+                        add_detection_record(img_name, f"处理失败: {str(e)}", detection_time, 0)
+                        # 使用原图作为结果
+                        result_images.append((img_array, img_name))
 
             end_time = time.time()
             process_time = end_time - start_time
@@ -428,10 +490,16 @@ with col1:
                         if idx < len(image_list):
                             img_arr, fname = image_list[idx]
                             with cols[col]:
+                                # 确保图片格式正确
+                                if len(img_arr.shape) == 3 and img_arr.shape[2] == 3:
+                                    # BGR to RGB
+                                    display_img = cv2.cvtColor(img_arr, cv2.COLOR_BGR2RGB)
+                                else:
+                                    display_img = img_arr
                                 st.image(
-                                    cv2.cvtColor(img_arr, cv2.COLOR_BGR2RGB),
+                                    display_img,
                                     caption=f"{caption_prefix}: {fname}",
-                                    use_column_width=True
+                                    use_container_width=True
                                 )
 
             preview_results = all_results[:num_per_row]
@@ -451,4 +519,78 @@ with col2:
 # ========== 底部统计表 =========
 st.markdown("---")
 show_category_table(st.session_state.latest_label_counts)
+
+# ========== 检测记录管理 =========
+st.markdown("---")
+st.markdown("### 📋 检测记录管理")
+
+col_record1, col_record2 = st.columns([3, 1])
+
+with col_record1:
+    if 'detection_records' in st.session_state and st.session_state.detection_records:
+        st.markdown("#### 当前检测记录")
+        
+        # 显示检测记录表格
+        df_records = pd.DataFrame(st.session_state.detection_records)
+        st.dataframe(
+            df_records,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "图片名称": st.column_config.TextColumn("图片名称", width="medium"),
+                "检测时间": st.column_config.TextColumn("检测时间", width="medium"),
+                "检测结果": st.column_config.TextColumn("检测结果", width="large"),
+                "检测对象总数": st.column_config.NumberColumn("检测对象总数", format="%d", width="small"),
+                "置信度阈值": st.column_config.NumberColumn("置信度阈值", format="%.2f", width="small")
+            }
+        )
+        
+        # 显示统计信息
+        total_images = len(st.session_state.detection_records)
+        images_with_objects = len([r for r in st.session_state.detection_records if r['检测对象总数'] > 0])
+        total_objects = sum([r['检测对象总数'] for r in st.session_state.detection_records])
+        
+        st.markdown(f"""
+        **📊 本次检测统计：**
+        - 总检测图片数：{total_images} 张
+        - 有检测对象的图片：{images_with_objects} 张
+        - 检测对象总数：{total_objects} 个
+        - 检测准确率：{(images_with_objects/total_images*100):.1f}%
+        """)
+        
+    else:
+        st.info("暂无检测记录。请先进行图片检测。")
+
+with col_record2:
+    st.markdown("#### 导出功能")
+    
+    if 'detection_records' in st.session_state and st.session_state.detection_records:
+        if st.button("📤 导出为CSV", type="primary"):
+            try:
+                filepath, df = export_detection_records_to_csv()
+                if filepath:
+                    log_event(f"检测记录导出成功: {os.path.basename(filepath)}")
+                    st.success(f"✅ 导出成功！\n文件保存位置：{filepath}")
+                    
+                    # 提供下载链接
+                    with open(filepath, 'rb') as f:
+                        st.download_button(
+                            label="🔽 下载CSV文件",
+                            data=f.read(),
+                            file_name=os.path.basename(filepath),
+                            mime='text/csv'
+                        )
+                else:
+                    st.error("❌ 导出失败！")
+            except Exception as e:
+                st.error(f"❌ 导出时出现错误：{str(e)}")
+                logger.error(f"导出CSV时出错: {e}")
+    else:
+        st.info("需要先进行检测才能导出记录")
+    
+    if st.button("🗑️ 清空记录"):
+        st.session_state.detection_records = []
+        log_event("清空检测记录")
+        st.success("✅ 记录已清空！")
+        st.rerun()
 
